@@ -25,6 +25,8 @@ package com.welie.blessed;
 
 import org.jetbrains.annotations.NotNull;
 
+import timber.log.Timber;
+
 /**
  * This class describes the HCI error codes as defined in the Bluetooth Standard, Volume 1, Part F, 1.3 HCI Error Code, pages 364-377.
  * See https://www.bluetooth.org/docman/handlers/downloaddoc.ashx?doc_id=478726,
@@ -407,6 +409,9 @@ public enum HciStatus {
             if (type.value == value)
                 return type;
         }
+
+        Timber.i("HciStatus: Integer status value received:" +value+". Does not match any of supported HCI status codes.");
+
         return UNKNOWN_STATUS_CODE;
     }
 }
