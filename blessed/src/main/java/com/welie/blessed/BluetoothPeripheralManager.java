@@ -23,6 +23,7 @@
 
 package com.welie.blessed;
 
+import android.annotation.SuppressLint;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
@@ -97,6 +98,7 @@ public class BluetoothPeripheralManager {
     private volatile boolean commandQueueBusy = false;
 
     protected final BluetoothGattServerCallback bluetoothGattServerCallback = new BluetoothGattServerCallback() {
+        @SuppressLint("MissingPermission")
         @Override
         public void onConnectionStateChange(final BluetoothDevice device, final int status, final int newState) {
 
@@ -126,6 +128,7 @@ public class BluetoothPeripheralManager {
             }
         }
 
+        @SuppressLint("MissingPermission")
         private void handleDeviceConnected(@NotNull final BluetoothDevice device) {
             Logger.i(TAG,"Central '%s' (%s) connected", device.getName(), device.getAddress());
             final BluetoothCentral bluetoothCentral = new BluetoothCentral(device.getAddress(), device.getName());
@@ -167,6 +170,7 @@ public class BluetoothPeripheralManager {
 
             final BluetoothCentral bluetoothCentral = getCentral(device);
             mainHandler.post(new Runnable() {
+                @SuppressLint("MissingPermission")
                 @Override
                 public void run() {
                     // Call onCharacteristic before any responses are sent, even if it is a long read
@@ -174,8 +178,8 @@ public class BluetoothPeripheralManager {
                         callback.onCharacteristicRead(bluetoothCentral, characteristic);
                     }
 
-                    // If data is longer than MTU - 1, cut the array. Only ATT_MTU - 1 bytes can be sent in Long Read.
-                    final byte[] value = copyOf(nonnullOf(characteristic.getValue()), offset, bluetoothCentral.getCurrentMtu() - 1);
+                    // Get the byte array starting at the offset
+                    final byte[] value = chopValue(characteristic.getValue(), offset);
 
                     bluetoothGattServer.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value);
                 }
@@ -189,6 +193,7 @@ public class BluetoothPeripheralManager {
             final byte[] safeValue = nonnullOf(value);
             final BluetoothCentral bluetoothCentral = getCentral(device);
             mainHandler.post(new Runnable() {
+                @SuppressLint("MissingPermission")
                 @Override
                 public void run() {
                     GattStatus status = GattStatus.SUCCESS;
@@ -224,6 +229,7 @@ public class BluetoothPeripheralManager {
 
             final BluetoothCentral bluetoothCentral = getCentral(device);
             mainHandler.post(new Runnable() {
+                @SuppressLint("MissingPermission")
                 @Override
                 public void run() {
                     // Call onDescriptorRead before any responses are sent, even if it is a long read
@@ -231,8 +237,8 @@ public class BluetoothPeripheralManager {
                         callback.onDescriptorRead(bluetoothCentral, descriptor);
                     }
 
-                    // If data is longer than MTU - 1, cut the array. Only ATT_MTU - 1 bytes can be sent in Long Read.
-                    final byte[] value = copyOf(nonnullOf(descriptor.getValue()), offset, bluetoothCentral.getCurrentMtu() - 1);
+                    // Get the byte array starting at the offset
+                    final byte[] value = chopValue(descriptor.getValue(), offset);
 
                     bluetoothGattServer.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value);
                 }
@@ -248,6 +254,7 @@ public class BluetoothPeripheralManager {
 
             final BluetoothCentral bluetoothCentral = getCentral(device);
             mainHandler.post(new Runnable() {
+                @SuppressLint("MissingPermission")
                 @Override
                 public void run() {
                     GattStatus status = GattStatus.SUCCESS;
@@ -311,6 +318,7 @@ public class BluetoothPeripheralManager {
             return status;
         }
 
+        @SuppressLint("MissingPermission")
         @Override
         public void onExecuteWrite(@NotNull final BluetoothDevice device, final int requestId, final boolean execute) {
             final BluetoothCentral bluetoothCentral = getCentral(device);
@@ -428,6 +436,7 @@ public class BluetoothPeripheralManager {
      * @param bluetoothManager a valid BluetoothManager
      * @param callback an instance of BluetoothPeripheralManagerCallback where the callbacks will be handled
      */
+    @SuppressLint("MissingPermission")
     public BluetoothPeripheralManager(@NotNull final Context context, @NotNull final BluetoothManager bluetoothManager, @NotNull final BluetoothPeripheralManagerCallback callback) {
         this.context = Objects.requireNonNull(context, CONTEXT_IS_NULL);
         this.callback = Objects.requireNonNull(callback, "Callback is null");
@@ -448,6 +457,7 @@ public class BluetoothPeripheralManager {
      * this BluetoothPeripheralManager.
      *
      */
+    @SuppressLint("MissingPermission")
     public void close() {
         stopAdvertising();
         context.unregisterReceiver(adapterStateReceiver);
@@ -464,6 +474,7 @@ public class BluetoothPeripheralManager {
      * @param advertiseData the AdvertiseData
      * @param scanResponse the ScanResponse
      */
+    @SuppressLint("MissingPermission")
     public void startAdvertising(@NotNull final AdvertiseSettings settings, @NotNull final AdvertiseData advertiseData, @NotNull final AdvertiseData scanResponse) {
         if (!bluetoothAdapter.isMultipleAdvertisementSupported()) {
             Logger.e(TAG,"device does not support advertising");
@@ -475,6 +486,7 @@ public class BluetoothPeripheralManager {
     /**
      * Stop advertising
      */
+    @SuppressLint("MissingPermission")
     public void stopAdvertising() {
         bluetoothLeAdvertiser.stopAdvertising(advertiseCallback);
         onAdvertisingStopped();
@@ -497,7 +509,8 @@ public class BluetoothPeripheralManager {
     public boolean add(@NotNull final BluetoothGattService service) {
         Objects.requireNonNull(service, SERVICE_IS_NULL);
 
-        final boolean result = commandQueue.add(new Runnable() {
+        return enqueue(new Runnable() {
+            @SuppressLint("MissingPermission")
             @Override
             public void run() {
                 if (!bluetoothGattServer.addService(service)) {
@@ -506,13 +519,6 @@ public class BluetoothPeripheralManager {
                 }
             }
         });
-
-        if (result) {
-            nextCommand();
-        } else {
-            Logger.e(TAG,"could not enqueue add service command");
-        }
-        return result;
     }
 
     /**
@@ -521,6 +527,7 @@ public class BluetoothPeripheralManager {
      * @param service the service to remove
      * @return true if the service was removed, otherwise false
      */
+    @SuppressLint("MissingPermission")
     public boolean remove(@NotNull final BluetoothGattService service) {
         Objects.requireNonNull(service, SERVICE_IS_NULL);
 
@@ -530,6 +537,7 @@ public class BluetoothPeripheralManager {
     /**
      * Remove all services
      */
+    @SuppressLint("MissingPermission")
     public void removeAllServices() {
         bluetoothGattServer.clearServices();
     }
@@ -577,8 +585,10 @@ public class BluetoothPeripheralManager {
 
         if (doesNotSupportNotifying(characteristic)) return false;
 
-        final boolean confirm = supportsIndicate(characteristic);
-        final boolean result = commandQueue.add(new Runnable() {
+        final byte[] descriptorValue = characteristic.getDescriptor(CCC_DESCRIPTOR_UUID).getValue();
+        final boolean confirm = supportsIndicate(characteristic) && Arrays.equals(descriptorValue, BluetoothGattDescriptor.ENABLE_INDICATION_VALUE);
+        return enqueue(new Runnable() {
+            @SuppressLint("MissingPermission")
             @Override
             public void run() {
                 currentNotifyValue = value;
@@ -590,13 +600,6 @@ public class BluetoothPeripheralManager {
                 }
             }
         });
-
-        if (result) {
-            nextCommand();
-        } else {
-            Logger.e(TAG,"could not enqueue notify command");
-        }
-        return result;
     }
 
     /**
@@ -609,6 +612,7 @@ public class BluetoothPeripheralManager {
         cancelConnection(bluetoothAdapter.getRemoteDevice(bluetoothCentral.getAddress()));
     }
 
+    @SuppressLint("MissingPermission")
     private void cancelConnection(@NotNull final BluetoothDevice bluetoothDevice) {
         Objects.requireNonNull(bluetoothDevice, DEVICE_IS_NULL);
 
@@ -616,6 +620,7 @@ public class BluetoothPeripheralManager {
         bluetoothGattServer.cancelConnection(bluetoothDevice);
     }
 
+    @SuppressLint("MissingPermission")
     private @NotNull List<BluetoothDevice> getConnectedDevices() {
         return bluetoothManager.getConnectedDevices(BluetoothGattServer.GATT);
     }
@@ -628,6 +633,22 @@ public class BluetoothPeripheralManager {
     public @NotNull Set<BluetoothCentral> getConnectedCentrals() {
         Set<BluetoothCentral> bluetoothCentrals = new HashSet<>(connectedCentralsMap.values());
         return Collections.unmodifiableSet(bluetoothCentrals);
+    }
+
+    /**
+     * Enqueue a runnable to the command queue
+     *
+     * @param command a Runnable containg a command
+     * @return true if the command was successfully enqueued, otherwise false
+     */
+    private boolean enqueue(Runnable command) {
+        final boolean result = commandQueue.add(command);
+        if (result) {
+            nextCommand();
+        } else {
+            Logger.e(TAG,"could not enqueue command");
+        }
+        return result;
     }
 
     /**
@@ -675,6 +696,7 @@ public class BluetoothPeripheralManager {
         return connectedCentralsMap.get(address);
     }
 
+    @SuppressLint("MissingPermission")
     @NotNull
     private BluetoothCentral getCentral(@NotNull final BluetoothDevice device) {
         Objects.requireNonNull(device, DEVICE_IS_NULL);
@@ -732,12 +754,22 @@ public class BluetoothPeripheralManager {
         onAdvertisingStopped();
     }
 
-    private @NotNull byte[] copyOf(@NotNull final byte[] source, final int offset, final int maxSize) {
-        if (source.length > maxSize) {
-            final int chunkSize = Math.min(source.length - offset, maxSize);
-            return Arrays.copyOfRange(source, offset, offset + chunkSize);
+    /**
+     * Chop only bytes at the beginning of the array based on offset, if array is bigger than MTU
+     * size Android OS will negotiate with central and it will issue multiple read requests.
+     * <p>
+     * Important note: When {@link BluetoothDevice#TRANSPORT_BREDR} is used by the central,
+     * only a single read request is issued by the central regardless of MTU size.
+     */
+    private byte[] chopValue(@Nullable final byte[] value, final int offset) {
+        byte[] choppedValue = new byte[0];
+
+        if (value == null) return choppedValue;
+
+        if (offset <= value.length) {
+            choppedValue = Arrays.copyOfRange(value, offset, value.length);
         }
-        return Arrays.copyOf(source, source.length);
+        return choppedValue;
     }
 
     /**

@@ -407,7 +407,7 @@ public class BluetoothCentralManagerTest {
         central.stopScan();
 
         // Then
-        verify(scanner).stopScan(scanCallbackCaptor.getValue());
+        verify(scanner, times(1)).stopScan(scanCallbackCaptor.getValue());
 
         // When
         central.stopScan();

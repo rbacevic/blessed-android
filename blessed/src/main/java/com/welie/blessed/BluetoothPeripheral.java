@@ -23,6 +23,7 @@
 
 package com.welie.blessed;
 
+import android.annotation.SuppressLint;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothGatt;
@@ -150,7 +151,7 @@ public class BluetoothPeripheral {
     private int nrTries;
     private long connectTimestamp;
     private int currentMtu = DEFAULT_MTU;
-    private Transport transport;
+    private final Transport transport;
 
     /**
      * This abstract class is used to implement BluetoothGatt callbacks.
@@ -158,7 +159,7 @@ public class BluetoothPeripheral {
     private final BluetoothGattCallback bluetoothGattCallback = new BluetoothGattCallback() {
         @Override
         public void onConnectionStateChange(@NotNull final BluetoothGatt gatt, final int status, final int newState) {
-            cancelConnectionTimer();
+            if (newState != BluetoothProfile.STATE_CONNECTING) cancelConnectionTimer();
             final int previousState = state;
             state = newState;
 
@@ -429,6 +430,16 @@ public class BluetoothPeripheral {
                 }
             });
         }
+
+        @Override
+        public void onServiceChanged(BluetoothGatt gatt) {
+            Logger.d(TAG, "onServiceChangedCalled");
+
+            // Does it realy make sense to discover services? Or should we just disconnect and reconnect?
+            commandQueue.clear();
+            commandQueueBusy = false;
+            delayedDiscoverServices(100);
+        }
     };
 
     private void successfullyConnected() {
@@ -446,6 +457,7 @@ public class BluetoothPeripheral {
 
     private void delayedDiscoverServices(final long delay) {
         discoverServicesRunnable = new Runnable() {
+            @SuppressLint("MissingPermission")
             @Override
             public void run() {
                 Logger.d(TAG,"discovering services of '%s' with delay of %d ms", getName(), delay);
@@ -575,6 +587,13 @@ public class BluetoothPeripheral {
                     }
                 });
 
+                // Check if we are missing a gatt object. This is the case if createBond was called on a disconnected peripheral
+                if (bluetoothGatt == null) {
+                    // Bonding succeeded so now we can connect
+                    connect();
+                    return;
+                }
+
                 // If bonding was started at connection time, we may still have to discover the services
                 // Also make sure we are not starting a discovery while another one is already in progress
                 if (getServices().isEmpty() && !discoveryStarted) {
@@ -657,6 +676,7 @@ public class BluetoothPeripheral {
     }
 
     private final BroadcastReceiver pairingRequestBroadcastReceiver = new BroadcastReceiver() {
+        @SuppressLint("MissingPermission")
         @Override
         public void onReceive(final Context context, final Intent intent) {
             final BluetoothDevice receivedDevice = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
@@ -717,10 +737,10 @@ public class BluetoothPeripheral {
                     Logger.i(TAG,"connect to '%s' (%s) using transport %s", getName(), getAddress(), transport.name());
                     registerBondingBroadcastReceivers();
                     discoveryStarted = false;
-                    bluetoothGatt = connectGattHelper(device, false, bluetoothGattCallback);
-                    bluetoothGattCallback.onConnectionStateChange(bluetoothGatt, HciStatus.SUCCESS.value, BluetoothProfile.STATE_CONNECTING);
                     connectTimestamp = SystemClock.elapsedRealtime();
                     startConnectionTimer(BluetoothPeripheral.this);
+                    bluetoothGattCallback.onConnectionStateChange(bluetoothGatt, HciStatus.SUCCESS.value, BluetoothProfile.STATE_CONNECTING);
+                    bluetoothGatt = connectGattHelper(device, false, bluetoothGattCallback);
                 }
             }, DIRECT_CONNECTION_DELAY_IN_MS);
         } else {
@@ -743,9 +763,9 @@ public class BluetoothPeripheral {
                     Logger.i(TAG,"autoConnect to '%s' (%s) using transport %s", getName(), getAddress(), transport.name());
                     registerBondingBroadcastReceivers();
                     discoveryStarted = false;
+                    connectTimestamp = SystemClock.elapsedRealtime();
                     bluetoothGatt = connectGattHelper(device, true, bluetoothGattCallback);
                     bluetoothGattCallback.onConnectionStateChange(bluetoothGatt, HciStatus.SUCCESS.value, BluetoothProfile.STATE_CONNECTING);
-                    connectTimestamp = SystemClock.elapsedRealtime();
                 }
             });
         } else {
@@ -767,15 +787,18 @@ public class BluetoothPeripheral {
      *
      * @return true if bonding was started/enqueued, false if not
      */
+    @SuppressLint("MissingPermission")
     public boolean createBond() {
         // Check if we have a Gatt object
         if (bluetoothGatt == null) {
             // No gatt object so no connection issued, do create bond immediately
+            Logger.d(TAG, "connecting and creating bond with '%s'", getName());
+            registerBondingBroadcastReceivers();
             return device.createBond();
         }
 
         // Enqueue the bond command because a connection has been issued or we are already connected
-        final boolean result = commandQueue.add(new Runnable() {
+        return enqueue(new Runnable() {
             @Override
             public void run() {
                 manuallyBonding = true;
@@ -788,13 +811,6 @@ public class BluetoothPeripheral {
                 }
             }
         });
-
-        if (result) {
-            nextCommand();
-        } else {
-            Logger.e(TAG,"could not enqueue bonding command");
-        }
-        return result;
     }
 
     /**
@@ -844,6 +860,7 @@ public class BluetoothPeripheral {
         if (state == BluetoothProfile.STATE_CONNECTED || state == BluetoothProfile.STATE_CONNECTING) {
             bluetoothGattCallback.onConnectionStateChange(bluetoothGatt, HciStatus.SUCCESS.value, BluetoothProfile.STATE_DISCONNECTING);
             mainHandler.post(new Runnable() {
+                @SuppressLint("MissingPermission")
                 @Override
                 public void run() {
                     if (state == BluetoothProfile.STATE_DISCONNECTING && bluetoothGatt != null) {
@@ -865,6 +882,7 @@ public class BluetoothPeripheral {
     /**
      * Complete the disconnect after getting connectionstate == disconnected
      */
+    @SuppressLint("MissingPermission")
     private void completeDisconnect(final boolean notify, @NotNull final HciStatus status) {
         if (bluetoothGatt != null) {
             bluetoothGatt.close();
@@ -873,6 +891,11 @@ public class BluetoothPeripheral {
         commandQueue.clear();
         commandQueueBusy = false;
         notifyingCharacteristics.clear();
+        currentMtu = DEFAULT_MTU;
+        currentCommand = IDLE;
+        manuallyBonding = false;
+        peripheralInitiatedBonding = false;
+        discoveryStarted = false;
         try {
             context.unregisterReceiver(bondStateReceiver);
             context.unregisterReceiver(pairingRequestBroadcastReceiver);
@@ -900,6 +923,7 @@ public class BluetoothPeripheral {
      *
      * @return the PeripheralType
      */
+    @SuppressLint("MissingPermission")
     @NotNull
     public PeripheralType getType() {
         return PeripheralType.fromValue(device.getType());
@@ -912,6 +936,7 @@ public class BluetoothPeripheral {
      */
     @NotNull
     public String getName() {
+        @SuppressLint("MissingPermission")
         final String name = device.getName();
         if (name != null) {
             // Cache the name so that we even know it when bluetooth is switched off
@@ -926,6 +951,7 @@ public class BluetoothPeripheral {
      *
      * @return the bond state
      */
+    @SuppressLint("MissingPermission")
     @NotNull
     public BondState getBondState() {
         return BondState.fromValue(device.getBondState());
@@ -1109,7 +1135,8 @@ public class BluetoothPeripheral {
             throw new IllegalArgumentException(message);
         }
 
-        final boolean result = commandQueue.add(new Runnable() {
+        return enqueue(new Runnable() {
+            @SuppressLint("MissingPermission")
             @Override
             public void run() {
                 if (isConnected()) {
@@ -1125,13 +1152,6 @@ public class BluetoothPeripheral {
                 }
             }
         });
-
-        if (result) {
-            nextCommand();
-        } else {
-            Logger.e(TAG,"could not enqueue read characteristic command");
-        }
-        return result;
     }
 
     private boolean doesNotSupportReading(@NotNull final BluetoothGattCharacteristic characteristic) {
@@ -1204,7 +1224,8 @@ public class BluetoothPeripheral {
         // Copy the value to avoid race conditions
         final byte[] bytesToWrite = copyOf(value);
 
-        final boolean result = commandQueue.add(new Runnable() {
+        return enqueue(new Runnable() {
+            @SuppressLint("MissingPermission")
             @Override
             public void run() {
                 if (isConnected()) {
@@ -1233,13 +1254,6 @@ public class BluetoothPeripheral {
                 }
             }
         });
-
-        if (result) {
-            nextCommand();
-        } else {
-            Logger.e(TAG,"could not enqueue write characteristic command");
-        }
-        return result;
     }
 
     private boolean willCauseLongWrite(@NotNull final byte[] value, @NotNull final WriteType writeType) {
@@ -1264,7 +1278,8 @@ public class BluetoothPeripheral {
             return false;
         }
 
-        final boolean result = commandQueue.add(new Runnable() {
+        return enqueue(new Runnable() {
+            @SuppressLint("MissingPermission")
             @Override
             public void run() {
                 if (isConnected()) {
@@ -1280,13 +1295,6 @@ public class BluetoothPeripheral {
                 }
             }
         });
-
-        if (result) {
-            nextCommand();
-        } else {
-            Logger.e(TAG,"could not enqueue read descriptor command");
-        }
-        return result;
     }
 
     /**
@@ -1318,7 +1326,8 @@ public class BluetoothPeripheral {
         // Copy the value to avoid race conditions
         final byte[] bytesToWrite = copyOf(value);
 
-        final boolean result = commandQueue.add(new Runnable() {
+        return enqueue(new Runnable() {
+            @SuppressLint("MissingPermission")
             @Override
             public void run() {
                 if (isConnected()) {
@@ -1336,13 +1345,6 @@ public class BluetoothPeripheral {
                 }
             }
         });
-
-        if (result) {
-            nextCommand();
-        } else {
-            Logger.e(TAG,"could not enqueue write descriptor command");
-        }
-        return result;
     }
 
     /**
@@ -1403,7 +1405,8 @@ public class BluetoothPeripheral {
         }
         final byte[] finalValue = enable ? value : BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE;
 
-        final boolean result = commandQueue.add(new Runnable() {
+        return enqueue(new Runnable() {
+            @SuppressLint("MissingPermission")
             @Override
             public void run() {
                 if (notConnected()) {
@@ -1430,13 +1433,6 @@ public class BluetoothPeripheral {
                 }
             }
         });
-
-        if (result) {
-            nextCommand();
-        } else {
-            Logger.e(TAG,"could not enqueue setNotify command");
-        }
-        return result;
     }
 
     private void adjustWriteTypeIfNeeded(@NotNull final BluetoothGattCharacteristic characteristic) {
@@ -1460,7 +1456,8 @@ public class BluetoothPeripheral {
             return false;
         }
 
-        final boolean result = commandQueue.add(new Runnable() {
+        return enqueue(new Runnable() {
+            @SuppressLint("MissingPermission")
             @Override
             public void run() {
                 if (isConnected()) {
@@ -1473,13 +1470,6 @@ public class BluetoothPeripheral {
                 }
             }
         });
-
-        if (result) {
-            nextCommand();
-        } else {
-            Logger.e(TAG,"could not enqueue readRemoteRssi command");
-        }
-        return result;
     }
 
     /**
@@ -1505,7 +1495,8 @@ public class BluetoothPeripheral {
             return false;
         }
 
-        final boolean result = commandQueue.add(new Runnable() {
+        return enqueue(new Runnable() {
+            @SuppressLint("MissingPermission")
             @Override
             public void run() {
                 if (isConnected()) {
@@ -1521,14 +1512,6 @@ public class BluetoothPeripheral {
                 }
             }
         });
-
-        if (result) {
-            nextCommand();
-        } else {
-            Logger.e(TAG,"could not enqueue requestMtu command");
-        }
-
-        return result;
     }
 
     /**
@@ -1545,7 +1528,8 @@ public class BluetoothPeripheral {
             return false;
         }
 
-        final boolean result = commandQueue.add(new Runnable() {
+        return enqueue(new Runnable() {
+            @SuppressLint("MissingPermission")
             @Override
             public void run() {
                 if (isConnected()) {
@@ -1565,13 +1549,6 @@ public class BluetoothPeripheral {
                 }, AVG_REQUEST_CONNECTION_PRIORITY_DURATION);
             }
         });
-
-        if (result) {
-            nextCommand();
-        } else {
-            Logger.e(TAG,"could not enqueue request connection priority command");
-        }
-        return result;
     }
 
     /**
@@ -1602,7 +1579,8 @@ public class BluetoothPeripheral {
             return false;
         }
 
-        final boolean result = commandQueue.add(new Runnable() {
+        return enqueue(new Runnable() {
+            @SuppressLint("MissingPermission")
             @Override
             public void run() {
                 if (isConnected()) {
@@ -1616,13 +1594,6 @@ public class BluetoothPeripheral {
                 }
             }
         });
-
-        if (result) {
-            nextCommand();
-        } else {
-            Logger.e(TAG,"could not enqueue setPreferredPhy command");
-        }
-        return result;
     }
 
     /**
@@ -1640,7 +1611,8 @@ public class BluetoothPeripheral {
             return false;
         }
 
-        final boolean result = commandQueue.add(new Runnable() {
+        return enqueue(new Runnable() {
+            @SuppressLint("MissingPermission")
             @Override
             public void run() {
                 if (isConnected()) {
@@ -1653,13 +1625,6 @@ public class BluetoothPeripheral {
                 }
             }
         });
-
-        if (result) {
-            nextCommand();
-        } else {
-            Logger.e(TAG,"could not enqueue readyPhy command");
-        }
-        return result;
     }
 
     /**
@@ -1678,6 +1643,22 @@ public class BluetoothPeripheral {
             }
         } catch (Exception e) {
             Logger.e(TAG,"could not invoke refresh method");
+        }
+        return result;
+    }
+
+    /**
+     * Enqueue a runnable to the command queue
+     *
+     * @param command a Runnable containg a command
+     * @return true if the command was successfully enqueued, otherwise false
+     */
+    private boolean enqueue(Runnable command) {
+        final boolean result = commandQueue.add(command);
+        if (result) {
+            nextCommand();
+        } else {
+            Logger.e(TAG,"could not enqueue command");
         }
         return result;
     }
@@ -1711,9 +1692,10 @@ public class BluetoothPeripheral {
     }
 
     /**
-     * Execute the next command in the subscribe queue.
+     * Execute the next command in the command queue.
+     * If a command is being executed the next command will not be executed
      * A queue is used because the calls have to be executed sequentially.
-     * If the read or write fails, the next command in the queue is executed.
+     * If the command fails, the next command in the queue is executed.
      */
     private void nextCommand() {
         synchronized (this) {
@@ -1831,6 +1813,7 @@ public class BluetoothPeripheral {
 
     /////////////////
 
+    @SuppressLint("MissingPermission")
     private BluetoothGatt connectGattHelper(BluetoothDevice remoteDevice, boolean autoConnect, BluetoothGattCallback bluetoothGattCallback) {
 
         if (remoteDevice == null) {
@@ -1883,6 +1866,7 @@ public class BluetoothPeripheral {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private BluetoothGatt connectGattCompat(BluetoothGattCallback bluetoothGattCallback, BluetoothDevice device, boolean autoConnect) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             return device.connectGatt(context, autoConnect, bluetoothGattCallback, transport.value);

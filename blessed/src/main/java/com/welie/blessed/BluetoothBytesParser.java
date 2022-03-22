@@ -61,6 +61,11 @@ public class BluetoothBytesParser {
     public static final int FORMAT_UINT16 = 0x12;
 
     /**
+     * Characteristic value format type uint24
+     */
+    public static final int FORMAT_UINT24 = 0x13;
+
+    /**
      * Characteristic value format type uint32
      */
     public static final int FORMAT_UINT32 = 0x14;
@@ -74,6 +79,11 @@ public class BluetoothBytesParser {
      * Characteristic value format type sint16
      */
     public static final int FORMAT_SINT16 = 0x22;
+
+    /**
+     * Characteristic value format type sint24
+     */
+    public static final int FORMAT_SINT24 = 0x23;
 
     /**
      * Characteristic value format type sint32
@@ -282,6 +292,14 @@ public class BluetoothBytesParser {
                 else
                     return unsignedBytesToInt(mValue[offset + 1], mValue[offset]);
 
+            case FORMAT_UINT24:
+                if (byteOrder == LITTLE_ENDIAN)
+                    return unsignedBytesToInt(mValue[offset], mValue[offset + 1],
+                            mValue[offset + 2], (byte) 0);
+                else
+                    return unsignedBytesToInt(mValue[offset + 2], mValue[offset + 1],
+                            mValue[offset], (byte) 0);
+
             case FORMAT_UINT32:
                 if (byteOrder == LITTLE_ENDIAN)
                     return unsignedBytesToInt(mValue[offset], mValue[offset + 1],
@@ -300,6 +318,14 @@ public class BluetoothBytesParser {
                 else
                     return unsignedToSigned(unsignedBytesToInt(mValue[offset + 1],
                             mValue[offset]), 16);
+
+            case FORMAT_SINT24:
+                if (byteOrder == LITTLE_ENDIAN)
+                    return unsignedToSigned(unsignedBytesToInt(mValue[offset],
+                            mValue[offset + 1], mValue[offset + 2], (byte) 0), 24);
+                else
+                    return unsignedToSigned(unsignedBytesToInt(mValue[offset + 2],
+                            mValue[offset + 1], mValue[offset], (byte) 0), 24);
 
             case FORMAT_SINT32:
                 if (byteOrder == LITTLE_ENDIAN)
@@ -516,6 +542,21 @@ public class BluetoothBytesParser {
                 }
                 break;
 
+            case FORMAT_SINT24:
+                newValue = intToSignedBits(newValue, 24);
+                // Fall-through intended
+            case FORMAT_UINT24:
+                if (internalByteOrder == LITTLE_ENDIAN) {
+                    mValue[newOffset++] = (byte) (newValue & 0xFF);
+                    mValue[newOffset++] = (byte) ((newValue >> 8) & 0xFF);
+                    mValue[newOffset] = (byte) ((newValue >> 16) & 0xFF);
+                } else {
+                    mValue[newOffset++] = (byte) ((newValue >> 16) & 0xFF);
+                    mValue[newOffset++] = (byte) ((newValue >> 8) & 0xFF);
+                    mValue[newOffset] = (byte) (newValue & 0xFF);
+                }
+                break;
+
             case FORMAT_SINT32:
                 newValue = intToSignedBits(newValue, 32);
                 // Fall-through intended
@@ -649,6 +690,27 @@ public class BluetoothBytesParser {
     }
 
     /**
+     * Set byte array to the bytes at current offset
+     *
+     * @param value byteArray to be added to this byte array
+     */
+    public void setByteArray(final byte[] value) {
+        setByteArray(value, internalOffset);
+        internalOffset += value.length;
+    }
+
+    /**
+     * Set byte array to a string at specified offset position
+     *
+     * @param value  byte array to be added to this byte array
+     * @param offset the offset to place the string at
+     */
+    public void setByteArray(final byte[] value, final int offset) {
+        prepareArray(offset + value.length);
+        System.arraycopy(value, 0, getValue(), offset, value.length);
+    }
+
+    /**
      * Set byte array to a string at current offset
      *
      * @param value String to be added to byte array
@@ -667,11 +729,9 @@ public class BluetoothBytesParser {
      * @param offset the offset to place the string at
      * @throws NullPointerException if value is null
      */
-    public void setString(final String value, final int offset) {
+    public void setString(@NotNull final String value, final int offset) {
         Objects.requireNonNull(value);
-        prepareArray(offset + value.length());
-        byte[] valueBytes = value.getBytes();
-        System.arraycopy(valueBytes, 0, mValue, offset, valueBytes.length);
+        setByteArray(value.getBytes(), offset);
     }
 
 

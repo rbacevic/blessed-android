@@ -24,8 +24,10 @@
 package com.welie.blessed;
 
 import android.Manifest;
+import android.annotation.SuppressLint;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothManager;
 import android.bluetooth.le.BluetoothLeScanner;
 import android.bluetooth.le.ScanCallback;
 import android.bluetooth.le.ScanFilter;
@@ -72,6 +74,7 @@ public class BluetoothCentralManager {
     private static final String NO_PERIPHERAL_ADDRESS_PROVIDED = "no peripheral address provided";
     private static final String NO_VALID_PERIPHERAL_PROVIDED = "no valid peripheral provided";
     private static final String NO_VALID_PERIPHERAL_CALLBACK_SPECIFIED = "no valid peripheral callback specified";
+    private static final String CANNOT_CONNECT_TO_PERIPHERAL_BECAUSE_BLUETOOTH_IS_OFF = "cannot connect to peripheral because Bluetooth is off";
 
     private @NotNull final Context context;
     private @NotNull final Handler callBackHandler;
@@ -105,7 +108,7 @@ public class BluetoothCentralManager {
         @Override
         public void onScanResult(final int callbackType, final ScanResult result) {
             synchronized (this) {
-                final String deviceName = result.getDevice().getName();
+                @SuppressLint("MissingPermission") final String deviceName = result.getDevice().getName();
                 if (deviceName == null) return;
 
                 for (String name : scanPeripheralNames) {
@@ -119,6 +122,7 @@ public class BluetoothCentralManager {
 
         @Override
         public void onScanFailed(final int errorCode) {
+            stopScan();
             sendScanFailed(ScanFailure.fromValue(errorCode));
         }
     };
@@ -133,6 +137,7 @@ public class BluetoothCentralManager {
 
         @Override
         public void onScanFailed(final int errorCode) {
+            stopScan();
             sendScanFailed(ScanFailure.fromValue(errorCode));
         }
     };
@@ -193,7 +198,7 @@ public class BluetoothCentralManager {
         public void onScanFailed(final int errorCode) {
             final ScanFailure scanFailure = ScanFailure.fromValue(errorCode);
             Logger.e(TAG,"autoConnect scan failed with error code %d (%s)", errorCode, scanFailure);
-            autoConnectScanner = null;
+            stopAutoconnectScan();
             callBackHandler.post(new Runnable() {
                 @Override
                 public void run() {
@@ -309,7 +314,8 @@ public class BluetoothCentralManager {
         this.context = Objects.requireNonNull(context, "no valid context provided");
         this.bluetoothCentralManagerCallback = Objects.requireNonNull(bluetoothCentralManagerCallback, "no valid bluetoothCallback provided");
         this.callBackHandler = Objects.requireNonNull(handler, "no valid handler provided");
-        this.bluetoothAdapter = Objects.requireNonNull(BluetoothAdapter.getDefaultAdapter(), "no bluetooth adapter found");
+        final BluetoothManager manager = Objects.requireNonNull((BluetoothManager) context.getSystemService(Context.BLUETOOTH_SERVICE),"cannot get BluetoothManager");
+        this.bluetoothAdapter = Objects.requireNonNull(manager.getAdapter(), "no bluetooth adapter found");
         this.autoConnectScanSettings = getScanSettings(ScanMode.LOW_POWER);
         this.scanSettings = getScanSettings(ScanMode.LOW_LATENCY);
 
@@ -394,6 +400,7 @@ public class BluetoothCentralManager {
         this.transport = Objects.requireNonNull(transport, "not a valid transport");
     }
 
+    @SuppressLint("MissingPermission")
     private void startScan(@NotNull final List<ScanFilter> filters, @NotNull final ScanSettings scanSettings, @NotNull final ScanCallback scanCallback) {
         if (bleNotReady()) return;
 
@@ -511,6 +518,7 @@ public class BluetoothCentralManager {
     /**
      * Scan for peripherals that need to be autoconnected but are not cached
      */
+    @SuppressLint("MissingPermission")
     private void scanForAutoConnectPeripherals() {
         if (bleNotReady()) return;
 
@@ -536,6 +544,7 @@ public class BluetoothCentralManager {
         }
     }
 
+    @SuppressLint("MissingPermission")
     private void stopAutoconnectScan() {
         cancelAutoConnectTimer();
         if (autoConnectScanner != null) {
@@ -552,6 +561,7 @@ public class BluetoothCentralManager {
     /**
      * Stop scanning for peripherals.
      */
+    @SuppressLint("MissingPermission")
     public void stopScan() {
         cancelTimeoutTimer();
         if (isScanning()) {
@@ -564,6 +574,7 @@ public class BluetoothCentralManager {
         }
         currentCallback = null;
         currentFilters = null;
+        bluetoothScanner = null;
         scannedPeripherals.clear();
     }
 
@@ -597,6 +608,11 @@ public class BluetoothCentralManager {
                 return;
             }
 
+            if (!bluetoothAdapter.isEnabled()) {
+                Logger.e(TAG, CANNOT_CONNECT_TO_PERIPHERAL_BECAUSE_BLUETOOTH_IS_OFF);
+                return;
+            }
+
             // Check if the peripheral is cached or not. If not, issue a warning because connection may fail
             // This is because Android will guess the address type and when incorrect it will fail
             if (peripheral.isUncached()) {
@@ -607,6 +623,43 @@ public class BluetoothCentralManager {
             scannedPeripherals.remove(peripheral.getAddress());
             unconnectedPeripherals.put(peripheral.getAddress(), peripheral);
             peripheral.connect();
+        }
+    }
+
+    /**
+     * Connect to a known peripheral and bond immediately. The peripheral must have been found by scanning for this call to succeed. This method will time out in max 30 seconds on most phones and in 5 seconds on Samsung phones.
+     * If the peripheral is already connected, no connection attempt will be made. This method is asynchronous and there can be only one outstanding connect.
+     *
+     * @param peripheral BLE peripheral to connect with
+     */
+    public void createBond(@NotNull final BluetoothPeripheral peripheral, @NotNull final BluetoothPeripheralCallback peripheralCallback) {
+        synchronized (connectLock) {
+            Objects.requireNonNull(peripheral, NO_VALID_PERIPHERAL_PROVIDED);
+            Objects.requireNonNull(peripheralCallback, NO_VALID_PERIPHERAL_CALLBACK_SPECIFIED);
+
+            if (connectedPeripherals.containsKey(peripheral.getAddress())) {
+                Logger.w(TAG,"already connected to %s'", peripheral.getAddress());
+                return;
+            }
+
+            if (unconnectedPeripherals.containsKey(peripheral.getAddress())) {
+                Logger.w(TAG,"already connecting to %s'", peripheral.getAddress());
+                return;
+            }
+
+            if (!bluetoothAdapter.isEnabled()) {
+                Logger.e(TAG, CANNOT_CONNECT_TO_PERIPHERAL_BECAUSE_BLUETOOTH_IS_OFF);
+                return;
+            }
+
+            // Check if the peripheral is cached or not. If not, issue a warning because connection may fail
+            // This is because Android will guess the address type and when incorrect it will fail
+            if (peripheral.isUncached()) {
+                Logger.w(TAG,"peripheral with address '%s' is not in the Bluetooth cache, hence connection may fail", peripheral.getAddress());
+            }
+
+            peripheral.setPeripheralCallback(peripheralCallback);
+            peripheral.createBond();
         }
     }
 
@@ -627,6 +680,11 @@ public class BluetoothCentralManager {
 
             if (unconnectedPeripherals.get(peripheral.getAddress()) != null) {
                 Logger.w(TAG,"already issued autoconnect for '%s' ", peripheral.getAddress());
+                return;
+            }
+
+            if (!bluetoothAdapter.isEnabled()) {
+                Logger.e(TAG, CANNOT_CONNECT_TO_PERIPHERAL_BECAUSE_BLUETOOTH_IS_OFF);
                 return;
             }
 
@@ -710,6 +768,11 @@ public class BluetoothCentralManager {
      */
     public void autoConnectPeripheralsBatch(@NotNull final Map<BluetoothPeripheral, BluetoothPeripheralCallback> batch) {
         Objects.requireNonNull(batch, "no valid batch provided");
+
+        if (!bluetoothAdapter.isEnabled()) {
+            Logger.e(TAG, CANNOT_CONNECT_TO_PERIPHERAL_BECAUSE_BLUETOOTH_IS_OFF);
+            return;
+        }
 
         // Find the uncached peripherals and issue autoConnectPeripheral for the cached ones
         final Map<BluetoothPeripheral, BluetoothPeripheralCallback> uncachedPeripherals = new HashMap<>();
@@ -802,7 +865,15 @@ public class BluetoothCentralManager {
 
     private boolean permissionsGranted() {
         final int targetSdkVersion = context.getApplicationInfo().targetSdkVersion;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && targetSdkVersion >= Build.VERSION_CODES.Q) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && targetSdkVersion >= Build.VERSION_CODES.S) {
+            if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_SCAN) != PackageManager.PERMISSION_GRANTED) {
+                throw new SecurityException("app does not have BLUETOOTH_SCAN permission, cannot start scan");
+            }
+            if (context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                throw new SecurityException("app does not have BLUETOOTH_CONNECT permission, cannot connect");
+            } else return true;
+        }
+        else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && targetSdkVersion >= Build.VERSION_CODES.Q) {
             if (context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
                 throw new SecurityException("app does not have ACCESS_FINE_LOCATION permission, cannot start scan");
             } else return true;
@@ -862,6 +933,7 @@ public class BluetoothCentralManager {
     private void setAutoConnectTimer() {
         cancelAutoConnectTimer();
         autoConnectRunnable = new Runnable() {
+            @SuppressLint("MissingPermission")
             @Override
             public void run() {
                 Logger.d(TAG,"autoconnect scan timeout, restarting scan");
@@ -930,10 +1002,12 @@ public class BluetoothCentralManager {
      * @param peripheralAddress the address of the peripheral
      * @return true if the peripheral was succesfully bonded or it wasn't bonded, false if it was bonded and removing it failed
      */
+    @SuppressLint("MissingPermission")
     public boolean removeBond(@NotNull final String peripheralAddress) {
         Objects.requireNonNull(peripheralAddress, NO_PERIPHERAL_ADDRESS_PROVIDED);
 
         // Get the set of bonded devices
+        @SuppressLint("MissingPermission")
         final Set<BluetoothDevice> bondedDevices = bluetoothAdapter.getBondedDevices();
 
         // See if the device is bonded
@@ -972,10 +1046,13 @@ public class BluetoothCentralManager {
      * <p>
      * If the pairing popup is shown within 60 seconds, it will be shown in the foreground.
      */
+    @SuppressLint("MissingPermission")
     public void startPairingPopupHack() {
         // Check if we are on a Samsung device because those don't need the hack
         final String manufacturer = Build.MANUFACTURER;
         if (!manufacturer.equalsIgnoreCase("samsung")) {
+            if (bleNotReady()) return;
+
             bluetoothAdapter.startDiscovery();
 
             callBackHandler.postDelayed(new Runnable() {
@@ -1045,18 +1122,18 @@ public class BluetoothCentralManager {
 
             if (action.equals(BluetoothAdapter.ACTION_STATE_CHANGED)) {
                 final int state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR);
+                handleAdapterState(state);
                 callBackHandler.post(new Runnable() {
                     @Override
                     public void run() {
                         bluetoothCentralManagerCallback.onBluetoothAdapterStateChanged(state);
                     }
                 });
-
-                handleAdapterState(state);
             }
         }
     };
 
+    @SuppressLint("MissingPermission")
     private void handleAdapterState(final int state) {
         switch (state) {
             case BluetoothAdapter.STATE_OFF:
@@ -1069,20 +1146,41 @@ public class BluetoothCentralManager {
                 Logger.d(TAG,"bluetooth turned off");
                 break;
             case BluetoothAdapter.STATE_TURNING_OFF:
+                // Stop all scans so that we are back in a clean state
+                if (isScanning()) {
+                    // Note that we can't call stopScan if the adapter is off
+                    // On some phones like the Nokia 8, the adapter will be already off at this point
+                    // So add a try/catch to handle any exceptions
+                    try {
+                        stopScan();
+                    } catch (Exception ignored) { }
+                }
+
+                if(isAutoScanning()) {
+                    try {
+                        stopAutoconnectScan();
+                    } catch (Exception ignored) { }
+                }
+
                 expectingBluetoothOffDisconnects = true;
 
-                // Stop all scans so that we are back in a clean state
-                // Note that we can't call stopScan if the adapter is off
                 cancelTimeoutTimer();
                 cancelAutoConnectTimer();
                 currentCallback = null;
                 currentFilters = null;
                 autoConnectScanner = null;
+                bluetoothScanner = null;
                 Logger.d(TAG,"bluetooth turning off");
                 break;
             case BluetoothAdapter.STATE_ON:
-                expectingBluetoothOffDisconnects = false;
                 Logger.d(TAG,"bluetooth turned on");
+
+                // On some phones like Nokia 8, this scanner may still have an older active scan from us
+                // This happens when bluetooth is toggled. So make sure it is gone.
+                bluetoothScanner = bluetoothAdapter.getBluetoothLeScanner();
+                bluetoothScanner.stopScan(defaultScanCallback);
+
+                expectingBluetoothOffDisconnects = false;
                 break;
             case BluetoothAdapter.STATE_TURNING_ON:
                 expectingBluetoothOffDisconnects = false;
